@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hero video generator</title>
+<style>
+  html, body { margin: 0; background: #111; color: #eee; font: 14px/1.4 monospace; }
+  canvas { width: 960px; height: 540px; display: block; margin: 16px; }
+  #status { margin: 16px; }
+</style>
+</head>
+<body>
+<div id="status">idle — open with ?record to capture</div>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+// Seamless loop: every motion term is a function of phase = 2π·t/T.
+const T = 10; // seconds
+const FPS = 30;
+const W = 1920, H = 1080;
+const cv = document.getElementById("c");
+const ctx = cv.getContext("2d");
+const TAU = Math.PI * 2;
+
+const COLS = 150, ROWS = 64;
+
+function frame(t) {
+  const p = (t % T) / T * TAU;
+
+  // Paper base with soft light falloff
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#f6f5f1");
+  bg.addColorStop(1, "#ecebe6");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Drifting accent glow (orbit = loop-safe)
+  const gx = W * 0.68 + Math.cos(p) * 140;
+  const gy = H * 0.42 + Math.sin(p) * 70;
+  const glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, 720);
+  glow.addColorStop(0, "rgba(70, 92, 255, 0.16)");
+  glow.addColorStop(0.5, "rgba(120, 140, 255, 0.06)");
+  glow.addColorStop(1, "rgba(120, 140, 255, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  // Perspective dot-field wave
+  const horizon = H * 0.30;
+  for (let r = 0; r < ROWS; r++) {
+    const z = r / (ROWS - 1);            // 0 = far, 1 = near
+    const depth = 0.18 + z * 1.6;
+    for (let c = 0; c < COLS; c++) {
+      const x = c / (COLS - 1) * 2 - 1;  // -1..1
+      const y =
+        Math.sin(x * 3.1 + p) * Math.cos(z * 4.2 - p) * 0.55 +
+        Math.sin(x * 7.0 - z * 3.0 + p * 2) * 0.12 +
+        Math.cos((x + z) * 2.0 - p) * 0.18;
+
+      const sx = W / 2 + x * W * 0.95 * depth;
+      const sy = horizon + depth * 360 - y * 120 * depth;
+      if (sx < -10 || sx > W + 10 || sy > H + 10) continue;
+
+      const size = 0.9 + z * 2.6;
+      const peak = y > 0.48;
+      const a = (0.10 + z * 0.55) * (peak ? 1 : 0.85);
+      ctx.fillStyle = peak
+        ? `rgba(48, 68, 255, ${Math.min(1, a + 0.15)})`
+        : `rgba(20, 20, 18, ${a})`;
+      ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+    }
+  }
+
+  // Fine horizontal scan line sweeping once per loop
+  const scan = ((t % T) / T) * H;
+  const sl = ctx.createLinearGradient(0, scan - 60, 0, scan + 2);
+  sl.addColorStop(0, "rgba(48, 68, 255, 0)");
+  sl.addColorStop(1, "rgba(48, 68, 255, 0.07)");
+  ctx.fillStyle = sl;
+  ctx.fillRect(0, scan - 60, W, 62);
+  ctx.fillStyle = "rgba(48, 68, 255, 0.18)";
+  ctx.fillRect(0, scan, W, 1);
+}
+
+const status = document.getElementById("status");
+const record = new URLSearchParams(location.search).has("record");
+
+if (!record) {
+  const t0 = performance.now();
+  (function loop(now) { frame((now - t0) / 1000); requestAnimationFrame(loop); })(t0);
+} else {
+  // Render frame-by-frame from a fixed clock so the loop is exact regardless of
+  // how fast the machine paints; the recorder captures each requested frame.
+  const stream = cv.captureStream(0);
+  const track = stream.getVideoTracks()[0];
+  const mime = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"].find((m) => MediaRecorder.isTypeSupported(m));
+  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 4_500_000 });
+  const chunks = [];
+  rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  rec.onstop = async () => {
+    const blob = new Blob(chunks, { type: "video/webm" });
+    status.textContent = `uploading ${(blob.size / 1e6).toFixed(2)} MB…`;
+    const r = await fetch("/__save-video", { method: "POST", body: blob });
+    const j = await r.json();
+    status.textContent = `DONE saved ${j.bytes} bytes (${mime})`;
+    window.__done = j;
+  };
+  // poster = first frame
+  frame(0);
+  cv.toBlob((b) => fetch("/__save-video?file=poster", { method: "POST", body: b }), "image/jpeg", 0.85);
+  rec.start();
+  const total = T * FPS;
+  let i = 0;
+  const step = () => {
+    if (i >= total) { rec.stop(); return; }
+    frame(i / FPS);
+    track.requestFrame();
+    status.textContent = `recording frame ${i + 1}/${total}`;
+    i++;
+    setTimeout(step, 1000 / FPS);
+  };
+  step();
+}
+</script>
+</body>
+</html>
